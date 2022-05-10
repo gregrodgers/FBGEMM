@@ -359,7 +359,9 @@ Tensor uvm_to_cpu_clone(Tensor t) {
 
 #ifndef __HIP_PLATFORM_HCC__
 // FIXME: some advanced "cudaMemAdvise" flags are not supported by HIP.
+#ifndef __clang__
 FBGEMM_GPU_ENUM_GLOGAL(uvm)
+#endif
 
 FBGEMM_GPU_ENUM_REGISTER_START(uvm, cudaMemoryAdvise){
     FBGEMM_GPU_ENUM_ITEM(cudaMemAdviseSetReadMostly),

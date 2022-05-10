@@ -49,7 +49,9 @@ void uvm_mem_advice_dont_fork(Tensor t);
 // Copy a contigious uvm Tensor (uvm_storage(t) is true) into a CPU Tensor
 // The copy uses single threaded memcpy
 Tensor uvm_to_cpu_clone(Tensor t);
-
+#if defined(__clang__) && defined(__device__)
+FBGEMM_GPU_ENUM_GLOGAL(uvm)
+#endif
 FBGEMM_GPU_ENUM_CREATE_TAG(uvm)
 
 } // namespace fbgemm_gpu

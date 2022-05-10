@@ -1472,6 +1472,7 @@ bucketize_sparse_features_cuda(
   return {new_lengths, new_indices, new_weights, new_pos};
 }
 
+#if !defined(_FBGEMM_OMP_TARGET)
 template <typename Dtype>
 __global__
 __launch_bounds__(kMaxThreads) void reorder_batched_ad_lengths_kernel(
@@ -1648,6 +1649,7 @@ Tensor reorder_batched_ad_indices_gpu(
       });
   return reordered_cat_ad_indices;
 }
+#endif
 
 // Forward kernel for batched unary embedding op
 template <typename scalar_t, typename index_t>
