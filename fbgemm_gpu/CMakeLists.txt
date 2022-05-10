@@ -13,9 +13,36 @@ if(FBGEMM_CPU_ONLY)
   message("Building for CPU-only")
 endif()
 
+option(FBGEMM_LLVM_DIR "Location of LLVM Installation Direction when building with clang compiler")
+option(FBGEMM_OMP_TARGET "Build fbgemm_gpu using clang OpenMP target offload" OFF)
+if(FBGEMM_LLVM_DIR)
+  if(NOT EXISTS ${FBGEMM_LLVM_DIR})
+    message(FATAL_ERROR "LLVM installation does not exist:${FBGEMM_LLVM_DIR}")
+  endif()
+  if(FBGEMM_OMP_TARGET)
+    message("Building for clang OpenMP Target offload")
+  else()
+    if(FBGEMM_CPU_ONLY)
+      message("Building for CPU-only with clang")
+    else()
+      message("Building for clang cuda (not nvcc)")
+    endif()
+  endif()
+  set(CMAKE_CUDA_COMPILER ${CMAKE_CXX_COMPILER})
+else()
+  # Using nvidia nvcc compiler
+  if(FBGEMM_OMP_TARGET)
+      message(FATAL_ERROR "FBGEMM_OMP_TARGET requires clang compiler")
+  endif()
+  if(NOT FBGEMM_CPU_ONLY)
+    message("Building for cuda with nvcc")
+  endif()
+endif()
+
 message("${message_line}")
 
-if(FBGEMM_CPU_ONLY)
+if(FBGEMM_CPU_ONLY OR FBGEMM_LLVM_DIR)
+  # Some cmake CUDA language customizations fail for clang
   project(
     fbgemm_gpu
     VERSION 0.0.1
@@ -29,6 +56,35 @@ endif()
 
 find_package(Torch REQUIRED)
 find_package(PythonExtensions REQUIRED)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  string(FIND ${CMAKE_CUDA_FLAGS} ",code=sm_" codeloc)
+  if(codeloc)
+    math(EXPR _oastart "${codeloc} + 6")
+    string(SUBSTRING ${CMAKE_CUDA_FLAGS} ${_oastart} 5 OARCH)
+    set(TRIPLE "nvptx64-nvidia-cuda")
+  else()
+    # FIXME: ThIS LIKELY WONT BE THE WAY TO GET AMDGCN OARCH
+    string(FIND ${CMAKE_CUDA_FLAGS} ",code=gfx" codeloc)
+    if(codeloc)
+      math(EXPR _oastart "${codeloc} + 6")
+      string(SUBSTRING ${CMAKE_CUDA_FLAGS} ${_oastart} 6 OARCH)
+      set(TRIPLE "amdgcn-amd-amdhsa")
+    else()
+      # set default to volta
+      set(OARCH "sm_70")
+      set(TRIPLE "nvptx64-nvidia-cuda")
+    endif()
+  endif()
+  set(CMAKE_CUDA_FLAGS "-Wno-cuda-compat -Wno-deprecated -DCUB_USE_COOPERATIVE_GROUPS -DONNX_NAMESPACE=onnx_c2 --offload-arch=${OARCH} -DTHRUST_IGNORE_CUB_VERSION_CHECK=ON")
+  set(CMAKE_CXX_FLAGS "-O3 -DCUB_USE_COOPERATIVE_GROUPS -DONNX_NAMESPACE=onnx_c2 -DTHRUST_IGNORE_CUB_VERSION_CHECK=ON")
+  list(APPEND TORCH_LIBRARIES ${FBGEMM_LLVM_DIR}/lib/libomp.so)
+  if(FBGEMM_OMP_TARGET)
+    list(APPEND TORCH_LIBRARIES ${FBGEMM_LLVM_DIR}/lib/libomptarget.so)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_FBGEMM_OMP_TARGET")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_FBGEMM_OMP_TARGET")
+  endif()
+endif()
 
 set(FBGEMM ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(THIRDPARTY ${FBGEMM}/third_party)
@@ -48,13 +104,39 @@ endif()
 # gen_embedding_forward_quantized_split_[un]weighted_codegen_cuda.cu
 #
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set(TORCH_CUDA_OPTIONS
+    -D__CUDA_NO_HALF_OPERATORS__
+    -D__CUDA_NO_BFLOAT16_CONVERSIONS__
+    -D__CUDA_NO_HALF2_OPERATORS__)
+else()
 set(TORCH_CUDA_OPTIONS
     --expt-relaxed-constexpr
     -D__CUDA_NO_HALF_OPERATORS__
     # -D__CUDA_NO_HALF_CONVERSIONS__
     -D__CUDA_NO_BFLOAT16_CONVERSIONS__
     -D__CUDA_NO_HALF2_OPERATORS__)
+endif()
 
+# A useful detailed configuration banner
+message("${message_line}")
+if(FBGEMM_LLVM_DIR)
+message("  ==> USE CLANG COMPILER:          YES")
+message("  ==> FBGEMM_OMP_TARGET:           ${FBGEMM_OMP_TARGET}")
+message("  ==> FBGEMM_LLVM_DIR:             ${FBGEMM_LLVM_DIR}")
+else()
+message("  ==> USE CLANG COMPILER:          NO")
+endif()
+message("  ==> FBGEMM_CPU_ONLY:             ${FBGEMM_CPU_ONLY}")
+message("  ==> CMAKE_CUDA_COMPILER:         ${CMAKE_CUDA_COMPILER}")
+message("  ==> CUDA_TOOLKIT_ROOT_DIR:       ${CUDA_TOOLKIT_ROOT_DIR}")
+message("  ==> CMAKE_CUDA_COMPILER_ID:      ${CMAKE_CUDA_COMPILER_ID}")
+message("  ==> CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
+message("  ==> CMAKE_CUDA_FLAGS:            ${CMAKE_CUDA_FLAGS}")
+message("  ==> CMAKE_CXX_FLAGS:             ${CMAKE_CXX_FLAGS}")
+message("  ==> TORCH_CUDA_OPTIONS:          ${TORCH_CUDA_OPTIONS}")
+message("  ==> TORCH_LIBRARIES:             ${TORCH_LIBRARIES}")
+message("${message_line}")
 #
 # GENERATED CUDA, CPP and Python code
 #
@@ -301,6 +383,7 @@ if(NOT FBGEMM_CPU_ONLY)
     PROPERTIES INCLUDE_DIRECTORIES "${cpp_fbgemm_files_include_directories}")
 endif()
 
+
 set_source_files_properties(
   ${fbgemm_gpu_sources_cpu}
   PROPERTIES INCLUDE_DIRECTORIES "${cpp_fbgemm_files_include_directories}")
@@ -309,6 +392,19 @@ if(NOT FBGEMM_CPU_ONLY)
   set(fbgemm_gpu_sources ${fbgemm_gpu_sources_gpu} ${fbgemm_gpu_sources_cpu})
 else()
   set(fbgemm_gpu_sources ${fbgemm_gpu_sources_cpu})
+endif()
+
+if(FBGEMM_OMP_TARGET)
+  # Compile files ending in _omp.cpp with omp target offload.
+  set(fbgemm_gpu_sources_omp src/sparse_ops_omp.cpp)
+  set_source_files_properties(${fbgemm_gpu_sources_omp}
+    PROPERTIES COMPILE_OPTIONS
+    "-fopenmp;-fopenmp-targets=${TRIPLE};-Xopenmp-target=${TRIPLE};-march=${OARCH}")
+  list(PREPEND cpp_fbgemm_files_include_directories ${FBGEMM_LLVM_DIR}/include)
+  set_source_files_properties(
+    ${fbgemm_gpu_sources_omp}
+    PROPERTIES INCLUDE_DIRECTORIES "${cpp_fbgemm_files_include_directories}")
+  set(fbgemm_gpu_sources ${fbgemm_gpu_sources_omp} ${fbgemm_gpu_sources})
 endif()
 
 #
@@ -330,6 +426,13 @@ if(NVML_LIB_PATH)
 endif()
 target_include_directories(fbgemm_gpu_py PRIVATE ${TORCH_INCLUDE_DIRS})
 set_property(TARGET fbgemm_gpu_py PROPERTY CXX_STANDARD 17)
+
+if(FBGEMM_LLVM_DIR)
+  if(FBGEMM_OMP_TARGET)
+    target_link_options(fbgemm_gpu_py PRIVATE -fopenmp -fopenmp-targets=${TRIPLE}
+	    -Xopenmp-target=${TRIPLE} -march=${OARCH} -L${FBGEMM_LLVM_DIR}/lib )
+  endif()
+endif()
 
 install(TARGETS fbgemm_gpu_py DESTINATION fbgemm_gpu)
 

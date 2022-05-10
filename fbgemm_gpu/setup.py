@@ -63,6 +63,18 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help="Certain operations require the nvml lib (libnvidia-ml.so). If you installed"
         " this in a custom location (through cudatoolkit-dev), provide the path here.",
     )
+    parser.add_argument(
+        "--clang",
+        dest="clang",
+        action="store_true",
+        help="build with clang (not nvcc/gcc)",
+    )
+    parser.add_argument(
+        "--omp_target",
+        dest="omp_target",
+        action="store_true",
+        help="build with OpenMP target offload (requires --clang )",
+    )
     return parser.parse_known_args(argv)
 
 
@@ -132,6 +144,13 @@ def find_cuda(major: int, minor: int) -> Optional[str]:
 def main(argv: List[str]) -> None:
     # Handle command line args before passing to main setup() method.
     args, unknown = parse_args(argv)
+    if args.omp_target:
+      if not args.clang:
+        print("WARNING: --omp_target requires clang, forcing --clang")
+        args.clang = True
+      if args.cpu_only:
+        print("WARNING: --omp_target requires GPUs, forcing --cpu_only")
+        args.cpu_only = False
     print("args: ", args)
     if len(unknown) != 0 and (len(unknown) != 1 or unknown[0] != "clean"):
         print("unknown: ", unknown)
@@ -168,6 +187,28 @@ def main(argv: List[str]) -> None:
         cmake_args.append("-DFBGEMM_CPU_ONLY=ON")
     if args.nvml_lib_path:
         cmake_args.append(f"-DNVML_LIB_PATH={args.nvml_lib_path}")
+
+    if args.clang:
+        llvm_dir = os.environ.get("LLVM_DIR")
+        if not llvm_dir:
+          print("setup.py: ERROR environment variable LLVM_DIR not set for --clang")
+          os._exit(1)
+        clang_cxx = (f"{llvm_dir}/bin/clang++")
+        clang_c = (f"{llvm_dir}/bin/clang")
+        if not os.path.exists(clang_cxx):
+          print(f"setup.py: ERROR  File {clang_cxx} does not exist")
+          os._exit(1)
+        if not os.path.exists(clang_c):
+          print(f"setup.py: ERROR  File {clang_c} does not exist")
+          os._exit(1)
+        cmake_args.append(f"-DFBGEMM_LLVM_DIR={llvm_dir}")
+        cmake_args.append(f"-DCMAKE_CXX_COMPILER={clang_cxx}")
+        cmake_args.append(f"-DCMAKE_C_COMPILER={clang_c}")
+        # Forces fbgremm_gpu_py.so to get libomp/libomptarget from compiler lib
+        cmake_args.append(f"-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON")
+        cmake_args.append(f"-DCMAKE_INSTALL_RPATH={llvm_dir}/lib")
+    if args.omp_target:
+        cmake_args.append("-DFBGEMM_OMP_TARGET=ON")
 
     name = args.package_name
     print("name: ", name)
